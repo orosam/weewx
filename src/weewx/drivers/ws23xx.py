@@ -240,13 +240,11 @@ bcd2num([a,b,c]) -> c*100+b*10+a
 import logging
 import time
 import string
-import fcntl
-import os
-import select
 import struct
-import termios
-import tty
+from contextlib import contextmanager
 from functools import reduce
+
+import serial
 
 import weeutil.weeutil
 import weewx.drivers
@@ -392,6 +390,8 @@ class WS23xxConfigurator(weewx.drivers.AbstractConfigurator):
 
 class WS23xxDriver(weewx.drivers.AbstractDevice):
     """Driver for LaCrosse WS23xx stations."""
+
+    SINGLE_OPEN="single_open"
     
     def __init__(self, **stn_dict):
         """Initialize the station object.
@@ -420,16 +420,16 @@ class WS23xxDriver(weewx.drivers.AbstractDevice):
                                                    True)
         self.enable_archive_records = stn_dict.get('enable_archive_records',
                                                    True)
-        self.mode = stn_dict.get('mode', 'single_open')
 
         log.info('driver version is %s' % DRIVER_VERSION)
         log.info('serial port is %s' % self.port)
         log.info('polling interval is %s' % self.polling_interval)
 
-        if self.mode == 'single_open':
-            self.station = WS23xx(self.port)
-        else:
-            self.station = None
+        mode = stn_dict.get("mode", self.SINGLE_OPEN)
+        self.station = WS23xx(self.port)
+        if mode == self.SINGLE_OPEN:
+            self.station.open()
+
 
     def closePort(self):
         if self.station is not None:
@@ -452,11 +452,8 @@ class WS23xxDriver(weewx.drivers.AbstractDevice):
         while ntries < self.max_tries:
             ntries += 1
             try:
-                if self.station:
-                    data = self.station.get_raw_data(SENSOR_IDS)
-                else:
-                    with WS23xx(self.port) as s:
-                        data = s.get_raw_data(SENSOR_IDS)
+                with self.station as s:
+                    data = s.get_raw_data(SENSOR_IDS)
                 packet = data_to_packet(data, int(time.time() + 0.5),
                                         last_rain=self._last_rain)
                 self._last_rain = packet['rainTotal']
@@ -488,75 +485,53 @@ class WS23xxDriver(weewx.drivers.AbstractDevice):
     def genStartupRecords(self, since_ts):
         if not self.enable_startup_records:
             raise NotImplementedError
-        if self.station:
-            return self.genRecords(self.station, since_ts)
-        else:
-            with WS23xx(self.port) as s:
-                return self.genRecords(s, since_ts)
+        return self.genRecords(since_ts)
 
     def genArchiveRecords(self, since_ts, count=0):
         if not self.enable_archive_records:
             raise NotImplementedError
-        if self.station:
-            return self.genRecords(self.station, since_ts, count)
-        else:
-            with WS23xx(self.port) as s:
-                return self.genRecords(s, since_ts, count)
+        return self.genRecords(since_ts, count)
 
-    def genRecords(self, s, since_ts, count=0):
-        last_rain = None
-        for ts, data in s.gen_records(since_ts=since_ts, count=count):
-            record = data_to_packet(data, ts, last_rain=last_rain)
-            record['interval'] = data['interval']
-            last_rain = record['rainTotal']
-            yield record
+    def genRecords(self, since_ts, count=0):
+        with self.station as s:
+            last_rain = None
+            for ts, data in s.gen_records(since_ts=since_ts, count=count):
+                record = data_to_packet(data, ts, last_rain=last_rain)
+                record['interval'] = data['interval']
+                last_rain = record['rainTotal']
+                yield record
 
 #    def getTime(self) :
-#        with WS23xx(self.port) as s:
+#        with self.station as s:
 #            return s.get_time()
 
 #    def setTime(self):
-#        with WS23xx(self.port) as s:
+#        with self.station as s:
 #            s.set_time()
 
     def getArchiveInterval(self):
-        if self.station:
-            return self.station.get_archive_interval()
-        else:
-            with WS23xx(self.port) as s:
-                return s.get_archive_interval()
+        with self.station as s:
+            return s.get_archive_interval()
 
     def setArchiveInterval(self, interval):
-        if self.station:
-            self.station.set_archive_interval(interval)
-        else:
-            with WS23xx(self.port) as s:
-                s.set_archive_interval(interval)
+        with self.station as s:
+            s.set_archive_interval(interval)
 
     def getConfig(self):
         fdata = dict()
-        if self.station:
-            data = self.station.get_raw_data(list(Measure.IDS.keys()))
-        else:
-            with WS23xx(self.port) as s:
-                data = s.get_raw_data(list(Measure.IDS.keys()))
+        with self.station as s:
+            data = s.get_raw_data(list(Measure.IDS.keys()))
         for key in data:
             fdata[Measure.IDS[key].name] = data[key]
         return fdata
 
     def getRecordCount(self):
-        if self.station:
-            return self.station.get_record_count()
-        else:
-            with WS23xx(self.port) as s:
-                return s.get_record_count()
+        with self.station as s:
+            return s.get_record_count()
 
     def clearHistory(self):
-        if self.station:
-            self.station.clear_memory()
-        else:
-            with WS23xx(self.port) as s:
-                s.clear_memory()
+        with self.station as s:
+            s.clear_memory()
 
 
 # ids for current weather conditions and connection type
@@ -628,24 +603,32 @@ class WS23xx:
     close serial port without all of the try/except/finally scaffolding."""
 
     def __init__(self, port):
-        log.debug('create LinuxSerialPort')
-        self.serial_port = LinuxSerialPort(port)
+        log.debug('create SerialPort')
+        serial_port = SerialPort(port, timeout=1.0)
         log.debug('create Ws2300')
-        self.ws = Ws2300(self.serial_port)
+        self.ws = Ws2300(serial_port)
+        self._persistent = False
 
     def __enter__(self):
-        log.debug('station enter')
+        if not self._persistent:
+            log.debug('station enter')
+            self.ws.open()
         return self
 
     def __exit__(self, type_, value, traceback):
-        log.debug('station exit')
-        self.ws = None
-        self.close()
+        if not self._persistent:
+            log.debug('station exit')
+            self.ws.close()
+
+    def open(self):
+        self.ws.open()
+        self._persistent = True
+        log.debug("open WS23XX")
 
     def close(self):
-        log.debug('close LinuxSerialPort')
-        self.serial_port.close()
-        self.serial_port = None
+        self._persistent = False
+        self.ws.close()
+        log.debug('close WS23XX')
 
     def set_time(self, ts):
         """Set station time to indicated unix epoch."""
@@ -807,146 +790,79 @@ class FatalError(Exception):
         self.cause = cause
         Exception.__init__(self, message)
 
-#
-# The serial port interface.  We can talk to the Ws2300 over anything
-# that implements this interface.
-#
-class SerialPort:
-    #
-    # Discard all characters waiting to be read.
-    #
-    def clear(self): raise NotImplementedError()
-    #
-    # Close the serial port.
-    #
-    def close(self): raise NotImplementedError()
-    #
-    # Wait for all characters to be sent.
-    #
-    def flush(self): raise NotImplementedError()
-    #
-    # Read a character, waiting for a most timeout seconds.  Return the
-    # character read, or None if the timeout occurred.
-    #
-    def read_byte(self, timeout): raise NotImplementedError()
-    #
-    # Release the serial port.  Closes it until it is used again, when
-    # it is automatically re-opened.  It need not be implemented.
-    #
-    def release(self): pass
-    #
-    # Write characters to the serial port.
-    #
-    def write(self, data): raise NotImplementedError()
 
-#
-# A Linux Serial port.  Implements the Serial interface on Linux.
-#
-class LinuxSerialPort(SerialPort):
-    SERIAL_CSIZE  = {
-        "7":    tty.CS7,
-        "8":    tty.CS8, }
-    SERIAL_PARITIES= {
-        "e":    tty.PARENB,
-        "n":    0,
-        "o":    tty.PARENB|tty.PARODD, }
-    SERIAL_SPEEDS = {
-        "300":    tty.B300,
-        "600":    tty.B600,
-        "1200":    tty.B1200,
-        "2400":    tty.B2400,
-        "4800":    tty.B4800,
-        "9600":    tty.B9600,
-        "19200":    tty.B19200,
-        "38400":    tty.B38400,
-        "57600":    tty.B57600,
-        "115200":    tty.B115200, }
-    SERIAL_SETTINGS = "2400,n,8,1"
-    device = None        # string, the device name.
-    orig_settings = None # class,  the original ports settings.
-    select_list = None   # list,   The serial ports
-    serial_port = None   # int,    OS handle to device.
-    settings = None      # string, the settings on the command line.
-    #
-    # Initialise ourselves.
-    #
-    def __init__(self,device,settings=SERIAL_SETTINGS):
-        self.device = device
-        self.settings = settings.split(",")
-        self.settings.extend([None,None,None])
-        self.settings[0] = self.__class__.SERIAL_SPEEDS.get(self.settings[0], None)
-        self.settings[1] = self.__class__.SERIAL_PARITIES.get(self.settings[1].lower(), None)
-        self.settings[2] = self.__class__.SERIAL_CSIZE.get(self.settings[2], None)
-        if len(self.settings) != 7 or None in self.settings[:3]:
-            raise FatalError(self.device, 'Bad serial settings "%s".' % settings)
-        self.settings = self.settings[:4]
+class SerialPort:
+    def __init__(self, device, timeout: float):
+        self._serial_port = serial.Serial(
+            None,
+            baudrate=2400,
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            timeout=timeout,
+            inter_byte_timeout=0,
+        )
+        self._serial_port.port = device
+
+    def __enter__(self):
+        self.open()
+        return self
+
+    def __exit__(self, type_, value, traceback):
+        self.close()
+
+    def open(self):
+        """Open and initialize the serial port."""
+        # Since GND is not connected, DTR and RTS is used for voltage reference by the station
+        self._serial_port.dtr = 0
+        self._serial_port.rts = 1
+        # Should we do a DTR/RTS powerdown-powerup sequence after open?
+        self._serial_port.open()
+
+        ### Is something like this neededfor pyserial?
         #
-        # Open the port.
+        # Restart IO if stopped using software flow control (^S/^Q).  This
+        # doesn't work on FreeBSD.
         #
-        try:
-            self.serial_port = os.open(self.device, os.O_RDWR)
-        except EnvironmentError as e:
-            raise FatalError(self.device, "can't open tty device - %s." % str(e))
-        try:
-            fcntl.flock(self.serial_port, fcntl.LOCK_EX)
-            self.orig_settings = tty.tcgetattr(self.serial_port)
-            setup = self.orig_settings[:]
-            setup[0] = tty.INPCK
-            setup[1] = 0
-            setup[2] = tty.CREAD|tty.HUPCL|tty.CLOCAL|reduce(lambda x,y: x|y, self.settings[:3])
-            setup[3] = 0        # tty.ICANON
-            setup[4] = self.settings[0]
-            setup[5] = self.settings[0]
-            setup[6] = [b'\000']*len(setup[6])
-            setup[6][tty.VMIN] = 1
-            setup[6][tty.VTIME] = 0
-            tty.tcflush(self.serial_port, tty.TCIOFLUSH)
-            #
-            # Restart IO if stopped using software flow control (^S/^Q).  This
-            # doesn't work on FreeBSD.
-            #
-            try:
-                tty.tcflow(self.serial_port, tty.TCOON|tty.TCION)
-            except termios.error:
-                pass
-            tty.tcsetattr(self.serial_port, tty.TCSAFLUSH, setup)
-            #
-            # Set DTR low and RTS high and leave other control lines untouched.
-            #
-            arg = struct.pack('I', 0)
-            arg = fcntl.ioctl(self.serial_port, tty.TIOCMGET, arg)
-            portstatus = struct.unpack('I', arg)[0]
-            portstatus = portstatus & ~tty.TIOCM_DTR | tty.TIOCM_RTS
-            arg = struct.pack('I', portstatus)
-            fcntl.ioctl(self.serial_port, tty.TIOCMSET, arg)
-            self.select_list = [self.serial_port]
-        except Exception:
-            os.close(self.serial_port)
-            raise
+        # try:
+        #     tty.tcflow(self.serial_port, tty.TCOON|tty.TCION)
+        # except termios.error:
+        #     pass
+
     def close(self):
-        if self.orig_settings:
-            tty.tcsetattr(self.serial_port, tty.TCSANOW, self.orig_settings)
-            os.close(self.serial_port)
-    def read_byte(self, timeout):
-        ready = select.select(self.select_list, [], [], timeout)
-        if not ready[0]:
+        """Close the serial port."""
+        # Should we power down RTS and DTR before closing?
+        self._serial_port.close()
+
+    def read_byte(self) -> bytes | None:
+        """Read a single byte from the port.
+        Return the byte read, or None if a timeout occurred.
+        """
+        result = self._serial_port.read(1)
+        if len(result) == 0:
             return None
-        return os.read(self.serial_port, 1)
-    #
-    # Write a string to the port.
-    #
-    def write(self, data):
-        os.write(self.serial_port, data)
-    #
-    # Flush the input buffer.
-    #
+
+        return result
+
+    def write(self, data: bytes):
+        """Write a sequence of bytes to the port."""
+        self._serial_port.write(data)
+
     def clear(self):
-        tty.tcflush(self.serial_port, tty.TCIFLUSH)
-    #
-    # Flush the output buffer.
-    #
+        """Discard all characters waiting to be read."""
+        self._serial_port.reset_input_buffer()
+
     def flush(self):
-        tty.tcdrain(self.serial_port)
+        """Wait for all characters to be sent."""
+        self._serial_port.flush()
+
+    @contextmanager
+    def temporary_read_timeout(self, new_timeout: float):
+        """Change the read timeout temporarily."""
+        old_timeout = self._serial_port.timeout
+        self._serial_port.timeout = new_timeout
+        yield
+        self._serial_port.timeout = old_timeout
 
 #
 # This class reads and writes bytes to a Ws2300.  It is passed something
@@ -988,10 +904,17 @@ class Ws2300:
     #
     # Initialise ourselves.
     #
-    def __init__(self, serial_port):
+    def __init__(self, serial_port: SerialPort):
         self.log_buffer = []
         self.log_nest = 0
-        self.serial_port = serial_port
+        self.serial_port: SerialPort = serial_port
+
+    def open(self):
+        self.serial_port.open()
+
+    def close(self):
+        self.serial_port.close()
+
     #
     # Write data to the device.
     #
@@ -1010,11 +933,11 @@ class Ws2300:
     #
     # Read a byte from the device.
     #
-    def read_byte(self, timeout=1.0):
+    def read_byte(self):
         if self.log_mode != 'r':
             self.log_mode = 'r'
             self.log(':')
-        result = self.serial_port.read_byte(timeout)
+        result = self.serial_port.read_byte()
         if not result:
             self.log("--")
         else:
@@ -1049,12 +972,13 @@ class Ws2300:
                 #
                 success = False
                 answer = self.read_byte()
-                while answer != None:
-                    if answer == b'\x02':
-                        success = True
-                    answer = self.read_byte(0.05)
-                    if success:
-                        return
+                with self.serial_port.temporary_read_timeout(0.05):
+                    while answer is not None:
+                        if answer == b'\x02':
+                            success = True
+                        answer = self.read_byte()
+                        if success:
+                            return
             msg = "Reset failed, %d retries, no response" % self.__class__.MAX_RESETS
             raise self.Ws2300Exception(msg)
         finally:
