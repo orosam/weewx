@@ -53,11 +53,11 @@ exclude = [
 ]
 
 [tool.poetry.dependencies]
-python = "^3.6"
+python = "^3.8"
 configobj = "^5.0"
 # This is the renamed "Cheetah" package:
 CT3 = "^3.1"
-Pillow = ">=5.2"
+Pillow = ">=10.0"
 ephem = "^4.1"
 PyMySQL = "^1.0"
 pyserial = "^3.4"
