@@ -6,7 +6,6 @@
 """Install or reconfigure a configuration file"""
 
 import getpass
-import grp
 import logging
 import os
 import os.path
@@ -29,6 +28,8 @@ import weeutil.config
 import weeutil.weeutil
 import weewx
 from weeutil.weeutil import to_float, to_bool, bcolors
+
+from weeutil.platform import get_groupname
 
 log = logging.getLogger('weectl-station')
 
@@ -649,7 +650,7 @@ def copy_util(config_path, config_dict, dry_run=False, force=False):
     weewxd_path = weewxd.__file__
     cfg_dir = os.path.dirname(config_path)
     username = getpass.getuser()
-    groupname = grp.getgrgid(os.getgid()).gr_name
+    groupname = get_groupname()
     weewx_root = config_dict['WEEWX_ROOT']
     util_dir = os.path.join(weewx_root, 'util')
     bin_dir = os.path.dirname(weewxd_path)
