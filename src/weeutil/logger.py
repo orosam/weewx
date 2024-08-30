@@ -26,7 +26,7 @@ LOGGING_STR = """[Logging]
     # Root logger
     [[root]]
       level = {log_level}
-      handlers = syslog,
+      handlers = console,
 
     # Additional loggers would go in the following section. This is useful for 
     # tailoring logging for individual modules.
@@ -36,12 +36,12 @@ LOGGING_STR = """[Logging]
     [[handlers]]
 
         # System logger
-        [[[syslog]]]
-            level = DEBUG
-            formatter = standard
-            class = logging.handlers.SysLogHandler
-            address = {address}
-            facility = {facility}
+ #       [[[syslog]]]
+ #           level = DEBUG
+ #           formatter = standard
+ #           class = logging.handlers.SysLogHandler
+ #           address = {address}
+ #           facility = {facility}
 
         # Log to console
         [[[console]]]
