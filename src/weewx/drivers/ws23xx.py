@@ -1191,6 +1191,63 @@ def num2bin(number, nybble_count):
         number //= 16
     return tuple(result)
 
+
+class NonBcdDigitError(ValueError):
+    def __init__(self, digit) -> None:
+        super().__init__(f"Non-BCD digit {digit}")
+        self.digit = digit
+
+
+class BcdNumsConverter:
+    """BCD data stream, "little endian": 1s are at front, followed by more significant digits."""
+
+    def __init__(self, digit_counts):
+        self._digit_counts = list(digit_counts)
+        for i in self._digit_counts:
+            if i <= 0:
+                raise ValueError("Digit counts must be greater than zero")
+
+    def to_numbers(self, nybbles):
+        """Read nybbles (sequence of numbers in range 0..9), return numbers.
+        The number of input nybbles must match the total conversion digit counts.
+        Non-BCD digits raise an error."""
+        # The station may use a "0xa" nybble to signal an unknown value.
+        digits = [self._validate_digit(n) for n in iter(nybbles)]
+        convert_len = sum(self._digit_counts)
+        if convert_len != len(digits):
+            raise ValueError(
+                f"BCD length {len(digits)} does not match total conversion digit count {convert_len}"
+            )
+
+        bcditer = iter(digits)
+        result = []
+        for cnt in self._digit_counts:
+            # decimal_places = accumulate(repeat(10, cnt - 1), operator.mul, initial=1)
+            # current = sum(place * digit for place, digit in zip(decimal_places, bcditer))
+            digits_slice = [digit for _, digit in zip(range(cnt), bcditer)]
+            result.append(bcd2num(digits_slice))
+        return result
+
+    @staticmethod
+    def _validate_digit(digit):
+        if 0 <= digit <= 9:
+            return digit
+        raise NonBcdDigitError(digit)
+
+    def from_numbers(self, numbers):
+        """Read numbers, convert to a list of nibbles.
+        Example:
+          digit_counts=[1, 2, 4], numbers=[1, 23, 456] => result=(1,3,2,6,5,4,0)"""
+        result = []
+        for idx, (cnt, num) in enumerate(zip(self._digit_counts, numbers, strict=True)):
+            if len(str(num)) > cnt:
+                raise ValueError(
+                    f"Number {num} longer than conversion digit count {cnt} at index {idx}"
+                )
+            result.extend(num2bcd(num, cnt))
+        return result
+
+
 #
 # A "Conversion" encapsulates a unit of measurement on the Ws2300.  Eg
 # temperature, or wind speed.
