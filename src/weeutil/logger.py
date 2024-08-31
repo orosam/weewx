@@ -118,7 +118,8 @@ def setup(process_name, config_dict=None):
         log_root = os.path.join(weewx_root, log_root)
 
     # Adjust the logging level in accordance to whether the 'debug' flag is on
-    log_level = 'DEBUG' if weewx.debug else 'INFO'
+    # log_level = 'DEBUG' if weewx.debug else 'INFO'
+    log_level = 'DEBUG'
 
     # Now we need to walk the structure, plugging in the values we know.
     # First, we need a function to do this:
