@@ -1758,10 +1758,6 @@ class Measure:
             self.__class__.NAMES[name] = self
     def __hash__(self):
         return hash(self.id)
-    def __cmp__(self, other):
-        if isinstance(other, Measure):
-            return cmp(self.id, other.id)
-        return cmp(type(self), type(other))
 
 
 #
