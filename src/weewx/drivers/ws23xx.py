@@ -2017,7 +2017,7 @@ Measure(0x527, "wind", conv_wind, "wind")
 #
 # Read the requests.
 #
-def read_measurements(ws2300, read_requests):
+def read_measurements(ws2300, read_requests: list[Measure]):
     if not read_requests:
         return []
     #
