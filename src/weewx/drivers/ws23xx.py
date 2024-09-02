@@ -237,12 +237,13 @@ bcd2num([a,b,c]) -> c*100+b*10+a
 # wsh 21
 # w0 135
 
+import datetime as dt
 import logging
-import time
 import string
 import struct
 from contextlib import contextmanager
 from functools import reduce
+from time import sleep
 
 import serial
 
@@ -297,7 +298,7 @@ class WS23xxConfigurator(weewx.drivers.AbstractConfigurator):
         elif options.nrecords is not None:
             self.show_history(count=options.nrecords)
         elif options.recmin is not None:
-            ts = int(time.time()) - options.recmin * 60
+            ts = int(posixts()) - options.recmin * 60
             self.show_history(ts=ts)
         elif options.settime:
             self.set_clock(prompt)
@@ -454,7 +455,7 @@ class WS23xxDriver(weewx.drivers.AbstractDevice):
             try:
                 with self.station as s:
                     data = s.get_raw_data(SENSOR_IDS)
-                packet = data_to_packet(data, int(time.time() + 0.5),
+                packet = data_to_packet(data, int(posixts() + 0.5),
                                         last_rain=self._last_rain)
                 self._last_rain = packet['rainTotal']
                 ntries = 0
@@ -471,12 +472,12 @@ class WS23xxDriver(weewx.drivers.AbstractDevice):
                         log.info("using %s second polling interval for %s connection"
                                  % (conn_info[1], conn_info[0]))
                         self._poll_wait = conn_info[1]
-                time.sleep(self._poll_wait)
+                sleep(self._poll_wait)
             except Ws2300.Ws2300Exception as e:
                 log.error("Failed attempt %d of %d to get LOOP data: %s"
                           % (ntries, self.max_tries, e))
                 log.debug("Waiting %d seconds before retry" % self.retry_wait)
-                time.sleep(self.retry_wait)
+                sleep(self.retry_wait)
         else:
             msg = "Max retries (%d) exceeded for LOOP data" % self.max_tries
             log.error(msg)
@@ -630,14 +631,15 @@ class WS23xx:
         self.ws.close()
         log.debug('close WS23XX')
 
-    def set_time(self, ts):
-        """Set station time to indicated unix epoch."""
-        log.debug('setting station clock to %s'
-                  % weeutil.weeutil.timestamp_to_string(ts))
-        for m in [Measure.IDS['sd'], Measure.IDS['st']]:
-            data = m.conv.value2binary(ts)
-            cmd = m.conv.write(data, None)
-            self.ws.write_safe(m.address, *cmd[1:])
+    # Disable station set time temporarily.
+    # def set_time(self, ts):
+    #     """Set station time to indicated unix epoch."""
+    #     log.debug('setting station clock to %s'
+    #               % weeutil.weeutil.timestamp_to_string(ts))
+    #     for m in [Measure.IDS['sd'], Measure.IDS['st']]:
+    #         data = m.conv.value2binary(ts)
+    #         cmd = m.conv.write(data, None)
+    #         self.ws.write_safe(m.address, *cmd[1:])
 
     def get_time(self):
         """Return station time as unix epoch."""
@@ -710,7 +712,7 @@ class WS23xx:
         time_to_next = int(measures[2].conv.binary2value(raw_data[2])) # minute
         numrec = int(measures[3].conv.binary2value(raw_data[3]))
 
-        now = int(time.time())
+        now = int(posixts())
         cstr = 'station'
         if use_computer_clock:
             latest_ts = now - (interval - time_to_next) * 60
@@ -759,10 +761,16 @@ class WS23xx:
             last_ts += interval * 60
 
     def get_raw_data(self, labels):
+        def convert(m, d):
+            ##### FIXME: temporary debug
+            log.debug("Converting measure: %s, value %s", m.name, repr(d))
+            return m.conv.binary2value(d)
+
         """Get raw data from the station, return as dictionary."""
         measures = [Measure.IDS[m] for m in labels]
         raw_data = read_measurements(self.ws, measures)
-        data_dict = dict(list(zip(labels, [m.conv.binary2value(d) for m, d in zip(measures, raw_data)])))
+        # data_dict = dict(list(zip(labels, [m.conv.binary2value(d) for m, d in zip(measures, raw_data)])))
+        data_dict = dict(list(zip(labels, [convert(m, d) for m, d in zip(measures, raw_data)])))
         return data_dict
 
 
@@ -942,7 +950,7 @@ class Ws2300:
             self.log("--")
         else:
             self.log("%02x" % ord(result))
-        time.sleep(0.01) # reduce chance of data spike by avoiding contention
+        sleep(0.01) # reduce chance of data spike by avoiding contention
         return result
     #
     # Remove all pending incoming characters.
@@ -1044,15 +1052,16 @@ class Ws2300:
     # isn't, of course.
     #
     def read_computer_time(self,nybble_address,nybble_count):
-        now = time.time()
-        tm = time.localtime(now)
-        tu = time.gmtime(now)
-        year2 = tm[0] % 100
+        now = dt.datetime.now(dt.timezone.utc)
+        # tm = time.localtime(now)
+        year2 = now.year % 100
+        # Synthesize 12 nybbles of timestamp:
+        # 6 nybbles: Clock in UTC
+        # 6 nybbles: Date in UTC
         datetime_data = (
-            tu[5]%10, tu[5]//10, tu[4]%10, tu[4]//10, tu[3]%10, tu[3]//10,
-            tm[5]%10, tm[5]//10, tm[4]%10, tm[4]//10, tm[3]%10, tm[3]//10,
-            tm[2]%10, tm[2]//10, tm[1]%10, tm[1]//10, year2%10, year2//10)
-        address = nybble_address+18
+            now.second%10, now.second//10, now.minute%10, now.minute//10, now.hour%10, now.hour//10,
+            now.day%10, now.day//10, now.month%10, now.month//10, year2%10, year2//10)
+        address = nybble_address+12
         return datetime_data[address:address+nybble_count]
     #
     # Read 'length' nybbles at address.  Returns: (nybble_at_address, ...).
@@ -1156,7 +1165,7 @@ class Ws2300:
         if self.log_nest == 1:
             if len(self.log_buffer) > 1000:
                 del self.log_buffer[0]
-            self.log_buffer.append("%5.2f %s " % (time.time() % 100, action))
+            self.log_buffer.append("%5.2f %s " % (posixts() % 100, action))
             self.log_mode = 'e'
     def log_exit(self):
         if not DEBUG_SERIAL:
@@ -1355,7 +1364,8 @@ class PressureConversion(BcdConversion):
 #
 # For values the represent a date.
 #
-class ConversionDate(Conversion):
+class ConversionFormattedDateTime(Conversion):
+    """Common base class for string-formatted date, time or datetime conversions."""
     format = None
     def __init__(self, nybble_count, format_):
         description =  format_
@@ -1363,113 +1373,139 @@ class ConversionDate(Conversion):
             description = description.replace(*xlate.split(":"))
         Conversion.__init__(self, "", nybble_count, description)
         self.format = format_
+
+class ConversionDateTime(ConversionFormattedDateTime):
+    """Common base class for string-formatted datetime conversions. The converted value is a float posix timestamp."""
+    tz = None
     def str(self, value):
-        return time.strftime(self.format, time.localtime(value))
+        ts = dt.datetime.fromtimestamp(value, tz=self.tz)
+        return ts.strftime(self.format)
     def parse(self, s):
-        return time.mktime(time.strptime(s, self.format))
+        ts = dt.datetime.strptime(s, self.format)
+        return ts.timestamp()
 
-class DateConversion(ConversionDate):
+# class DateConversion(ConversionFormattedDateTime):
+#     """Date conversion. Value is the posix timestamp of the date at 00:00 (UTC)"""
+#     ### `date` object
+#     def __init__(self):
+#         ConversionFormattedDateTime.__init__(self, 6, "%Y-%m-%d")
+#     def binary2value(self, data):
+#         x = bcd2num(data)
+#         return time.mktime((
+#                 x //     10000 % 100,
+#                 x //       100 % 100,
+#                 x              % 100,
+#                 0,
+#                 0,
+#                 0,
+#                 0,
+#                 0,
+#                 0))
+#     def value2binary(self, value):
+#         tm = time.localtime(value)
+#         dt = tm[2] +  tm[1] * 100 + (tm[0]-2000) * 10000
+#         return num2bcd(dt, self.nybble_count)
+#     def str(self, value):
+#         ts = dt.fromtimestamp(value)
+#         return ts.strftime(self.format)
+#     def parse(self, s):
+#         # Internal value is a datetime.date object
+#         ts = dt.strptime(s, self.format)
+#         return ts.timestamp()
+
+class WsLocalDatetimeConversion(ConversionDateTime):
+    """Convert WS-style local datetime (minute precision).
+    BCD nybbles (M: minute, H: hour, D: day of week (Mon-Sun: 1-7), d: day, m: month, y: year): MMHHDddmmyy"""
     def __init__(self):
-        ConversionDate.__init__(self, 6, "%Y-%m-%d")
+        ConversionDateTime.__init__(self, 11, "%Y-%m-%d %H:%M")
     def binary2value(self, data):
         x = bcd2num(data)
-        return time.mktime((
-                x //     10000 % 100,
-                x //       100 % 100,
-                x              % 100,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0))
+        date = dt.datetime(
+            x // 1_000_000_000 % 100 + 2000,  # yy
+            x //    10_000_000 % 100,  # mm
+            x //       100_000 % 100,  # dd
+            # Note: day of week is skipped
+            x //           100 % 100,  # HH
+            x                  % 100,  # MM
+            tzinfo=self.tz,
+        )
+        return date.timestamp()
     def value2binary(self, value):
-        tm = time.localtime(value)
-        dt = tm[2] +  tm[1] * 100 + (tm[0]-2000) * 10000
-        return num2bcd(dt, self.nybble_count)
+        tm = dt.datetime.fromtimestamp(value, tz=self.tz)
+        dtnum = tm.minute + (tm.hour + (tm.isoweekday + (tm.day + (tm.month + (tm.year - 2000) * 100) * 100) * 10) * 100) * 100
+        return num2bcd(dtnum, self.nybble_count)
 
-class DatetimeConversion(ConversionDate):
+class UnixtimeConversion(ConversionDateTime):
+    """Convert UTC datetime (seconds precision). 
+    BCD nybbles (S: second, M: minute, H: hour, d: day, m: month, y: year): SSMMHHddmmyy"""
+    tz = dt.timezone.utc
+
     def __init__(self):
-        ConversionDate.__init__(self, 11, "%Y-%m-%d %H:%M")
+        ConversionDateTime.__init__(self, 12, "%Y-%m-%d %H:%M:%S")
     def binary2value(self, data):
         x = bcd2num(data)
-        return time.mktime((
-                x // 1000000000 % 100 + 2000,
-                x //   10000000 % 100,
-                x //     100000 % 100,
-                x //        100 % 100,
-                x               % 100,
-                0,
-                0,
-                0,
-                0))
+        date = dt.datetime(
+            x // 10_000_000_000 % 100 + 2000,  # yy
+            x //    100_000_000 % 100,  # mm
+            x //      1_000_000 % 100,  # dd
+            x //         10_000 % 100,  # HH
+            x //            100 % 100,  # MM
+            x                   % 100,  # SS
+            tzinfo=self.tz,
+        )
+        return date.timestamp()
     def value2binary(self, value):
-        tm = time.localtime(value)
-        dow = tm[6] + 1
-        dt = tm[4]+(tm[3]+(dow+(tm[2]+(tm[1]+(tm[0]-2000)*100)*100)*10)*100)*100
-        return num2bcd(dt, self.nybble_count)
+        tm = dt.datetime.fromtimestamp(value, tzinfo=self.tz)
+        dtnum = tm.second+(tm.minute+(tm.hour+(tm.day+(tm.month+(tm.year-2000)*100)*100)*100)*100)*100
+        return num2bcd(dtnum, self.nybble_count)
 
-class UnixtimeConversion(ConversionDate):
+class WsTimestampConversion(ConversionDateTime):
+    """Convert WS-style, minute precision, timestamp.
+    BCD nybbles (M: minute, H: hour, d: day, m: month, y: year): MMHHddmmyy"""
     def __init__(self):
-        ConversionDate.__init__(self, 12, "%Y-%m-%d %H:%M:%S")
+        ConversionDateTime.__init__(self, 10, "%Y-%m-%d %H:%M")
+        self._converter = BcdNumsConverter([2, 2, 2, 2, 2])  # MM HH dd mm yy
     def binary2value(self, data):
-        x = bcd2num(data)
-        return time.mktime((
-                x //10000000000 % 100 + 2000,
-                x //  100000000 % 100,
-                x //    1000000 % 100,
-                x //      10000 % 100,
-                x //        100 % 100,
-                x               % 100,
-                0,
-                0,
-                0))
-    def value2binary(self, value):
-        tm = time.localtime(value)
-        dt = tm[5]+(tm[4]+(tm[3]+(tm[2]+(tm[1]+(tm[0]-2000)*100)*100)*100)*100)*100
-        return num2bcd(dt, self.nybble_count)
+        try:
+            min, hour, day, mon, year2 = self._converter.to_numbers(data)
+            date = dt.datetime(2000 + year2, mon, day, hour, min, tzinfo=self.tz)
+            return date.timestamp()
+        except NonBcdDigitError as e:
+            log.debug("Timestamp conversion encountered unknown data nybble %s, skipping.", str(e.digit))
+        except ValueError as e:
+            # In case the station memory is not yet initialized
+            log.debug("Timestamp conversion failed: %s", str(e))
+        return None
 
-class TimestampConversion(ConversionDate):
-    def __init__(self):
-        ConversionDate.__init__(self, 10, "%Y-%m-%d %H:%M")
-    def binary2value(self, data):
-        x = bcd2num(data)
-        return time.mktime((
-                x // 100000000 % 100 + 2000,
-                x //   1000000 % 100,
-                x //     10000 % 100,
-                x //       100 % 100,
-                x              % 100,
-                0,
-                0,
-                0,
-                0))
     def value2binary(self, value):
-        tm = time.localtime(value)
-        dt = tm[4] + (tm[3] + (tm[2] + (tm[1] +  (tm[0]-2000)*100)*100)*100)*100
-        return num2bcd(dt, self.nybble_count)
+        tm = dt.datetime.fromtimestamp(value, tz=self.tz)
+        dtnum = tm.minute+(tm.hour+(tm.day+(tm.month+(tm.year-2000)*100)*100)*100)*100
+        return num2bcd(dtnum, self.nybble_count)
 
-class TimeConversion(ConversionDate):
-    def __init__(self):
-        ConversionDate.__init__(self, 6, "%H:%M:%S")
-    def binary2value(self, data):
-        x = bcd2num(data)
-        return time.mktime((
-                0,
-                0,
-                0,
-                x //     10000 % 100,
-                x //       100 % 100,
-                x              % 100,
-                0,
-                0,
-                0)) - time.timezone
-    def value2binary(self, value):
-        tm = time.localtime(value)
-        dt = tm[5] + tm[4]*100 + tm[3]*10000
-        return num2bcd(dt, self.nybble_count)
-    def parse(self, s):
-        return time.mktime((0,0,0) + time.strptime(s, self.format)[3:]) + time.timezone
+# class TimeConversion(ConversionFormattedDateTime):
+#     ### `time` object. Used to set station time. STATION TIME IS IN UTC.
+#     def __init__(self):
+#         ConversionFormattedDateTime.__init__(self, 6, "%H:%M:%S")
+#     def binary2value(self, data):
+#         x = bcd2num(data)
+#         breakpoint()
+#         return time.mktime((
+#                 0,
+#                 0,
+#                 0,
+#                 x //     10000 % 100,
+#                 x //       100 % 100,
+#                 x              % 100,
+#                 0,
+#                 0,
+#                 0)) - time.timezone
+#     def value2binary(self, value):
+#         tm = time.localtime(value)
+#         dt = tm[5] + tm[4]*100 + tm[3]*10000
+#         return num2bcd(dt, self.nybble_count)
+#     def parse(self, s):
+#         ### Originally, the internal value representation is the seconds since epoch.
+#         return time.mktime((0,0,0) + time.strptime(s, self.format)[3:]) + time.timezone
 
 class WindDirectionConversion(Conversion):
     def __init__(self):
@@ -1686,12 +1722,12 @@ conv_als2 = AlarmSetConversion(2)
 conv_als3 = AlarmSetConversion(3)
 conv_buzz = SetresetConversion(3, {0:'on', 1:'off'})
 conv_lbck = SetresetConversion(0, {0:'off', 1:'on'})
-conv_date = DateConversion()
-conv_dtme = DatetimeConversion()
+# conv_date = DateConversion()
+conv_wsdt = WsLocalDatetimeConversion()
 conv_utme = UnixtimeConversion()
 conv_hist = HistoryConversion()
-conv_stmp = TimestampConversion()
-conv_time = TimeConversion()
+conv_stmp = WsTimestampConversion()
+# conv_time = TimeConversion()
 conv_wdir = WindDirectionConversion()
 conv_wvel = WindVelocityConversion()
 conv_conn = TextConversion({0:"cable", 3:"lost", 15:"wireless"})
@@ -1814,9 +1850,10 @@ class HistoryMeasure(Measure):
 # And of course, the "c?"'s aren't real measures at all - its the current
 # time on this machine.
 #
-Measure(  -18, "ct",   conv_time, "this computer's time")
+### FIXME: what's the point of the ct time? What does it even mean?
+# REMOVED ## Measure(  -18, "ct",   conv_time, "this computer's time")
 Measure(  -12, "cw",   conv_utme, "this computer's date time")
-Measure(   -6, "cd",   conv_date, "this computer's date")
+# Measure(   -6, "cd",   conv_date, "this computer's date")
 Measure(0x006, "bz",   conv_buzz, "buzzer")
 Measure(0x00f, "wsu",  conv_spdu, "wind speed units")
 Measure(0x016, "lb",   conv_lbck, "lcd backlight")
@@ -1881,9 +1918,10 @@ Measure(0x02b, None,   conv_ala0, "rain 24h alarm active alias")
 Measure(0x02c, None,   conv_ala2, "wind direction alarm active alias")
 Measure(0x02c, None,   conv_ala2, "wind speed max alarm active alias")
 Measure(0x02c, None,   conv_ala2, "wind speed min alarm active alias")
-Measure(0x200, "st",   conv_time, "station set time",		reset="ct")
-Measure(0x23b, "sw",   conv_dtme, "station current date time")
-Measure(0x24d, "sd",   conv_date, "station set date",		reset="cd")
+# Disable station datetime setting for now. 
+# Measure(0x200, "st",   conv_time, "station set time",		reset="ct")
+Measure(0x23b, "sw",   conv_wsdt, "station current date time")  # Station LOCAL datetime
+# Measure(0x24d, "sd",   conv_date, "station set date",		reset="cd")
 Measure(0x266, "lc",   conv_lcon, "lcd contrast (ro)")
 Measure(0x26b, "for",  conv_fore, "forecast")
 Measure(0x26c, "ten",  conv_tend, "tendency")
@@ -2100,3 +2138,6 @@ if __name__ == '__main__':
         if options.hm:
             for m in Measure.IDS:
                 print("%s\t%s" % (m, Measure.IDS[m].name))
+
+def posixts() -> float:
+    return dt.datetime.now(dt.timezone.utc).timestamp()
